@@ -4,7 +4,7 @@ import com.alibaba.datax.common.spi.ErrorCode;
 
 public enum MysqlReaderErrorCode implements ErrorCode {
     ;
-
+/*yangzhiguo*/
     private final String code;
     private final String description;
 
