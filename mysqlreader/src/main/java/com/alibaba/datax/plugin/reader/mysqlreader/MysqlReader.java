@@ -12,7 +12,9 @@ import org.slf4j.LoggerFactory;
 import java.util.List;
 
 public class MysqlReader extends Reader {
-
+//dddd
+    //dddd
+    //dddddd
     private static final DataBaseType DATABASE_TYPE = DataBaseType.MySql;
 
     public static class Job extends Reader.Job {
