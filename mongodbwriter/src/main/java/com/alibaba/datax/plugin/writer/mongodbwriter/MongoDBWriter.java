@@ -5,6 +5,7 @@ import com.alibaba.datax.common.exception.DataXException;
 import com.alibaba.datax.common.plugin.RecordReceiver;
 import com.alibaba.datax.common.spi.Writer;
 import com.alibaba.datax.common.util.Configuration;
+import com.alibaba.datax.common.util.FilterUtil;
 import com.alibaba.datax.plugin.rdbms.writer.Key;
 import com.alibaba.datax.plugin.writer.mongodbwriter.util.MongoUtil;
 import com.alibaba.fastjson.JSON;
@@ -12,17 +13,23 @@ import com.alibaba.fastjson.JSONArray;
 import com.alibaba.fastjson.JSONObject;
 import com.google.common.base.Strings;
 import com.mongodb.*;
+import com.mongodb.client.FindIterable;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoDatabase;
-import com.mongodb.client.model.BulkWriteOptions;
-import com.mongodb.client.model.ReplaceOneModel;
-import com.mongodb.client.model.UpdateOptions;
+import com.mongodb.client.model.*;
+import org.apache.avro.data.Json;
+import org.apache.commons.lang.StringEscapeUtils;
+import org.bson.BasicBSONObject;
+import org.bson.Document;
+import org.bson.conversions.Bson;
 import org.bson.types.ObjectId;
+import org.codehaus.jackson.map.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.ArrayList;
-import java.util.List;
+import java.io.IOException;
+import java.lang.reflect.Array;
+import java.util.*;
 
 public class MongoDBWriter extends Writer{
 
@@ -64,7 +71,7 @@ public class MongoDBWriter extends Writer{
 
         private String userName = null;
         private String password = null;
-
+        private String authdb = null;
         private String database = null;
         private String collection = null;
         private Integer batchSize = null;
@@ -145,15 +152,15 @@ public class MongoDBWriter extends Writer{
             }
         }
 
-        private void doBatchInsert(MongoCollection<BasicDBObject> collection, List<Record> writerBuffer, JSONArray columnMeta) {
+        private void doBatchInsert(MongoCollection<BasicDBObject> coll, List<Record> writerBuffer, JSONArray columnMeta) {
 
             List<BasicDBObject> dataList = new ArrayList<BasicDBObject>();
 
-            for(Record record : writerBuffer) {
+            for (Record record : writerBuffer) {
 
                 BasicDBObject data = new BasicDBObject();
 
-                for(int i = 0; i < record.getColumnNumber(); i++) {
+                for (int i = 0; i < record.getColumnNumber(); i++) {
 
                     String type = columnMeta.getJSONObject(i).getString(KeyConstant.COLUMN_TYPE);
                     //空记录处理
@@ -174,12 +181,12 @@ public class MongoDBWriter extends Writer{
                         } catch (Exception e) {
                             super.getTaskPluginCollector().collectDirtyRecord(record, e);
                         }
-                    } else if(record.getColumn(i) instanceof StringColumn){
+                    } else if (record.getColumn(i) instanceof StringColumn) {
                         //处理ObjectId和数组类型
                         try {
                             if (KeyConstant.isObjectIdType(type.toLowerCase())) {
                                 data.put(columnMeta.getJSONObject(i).getString(KeyConstant.COLUMN_NAME),
-                                    new ObjectId(record.getColumn(i).asString()));
+                                        new ObjectId(record.getColumn(i).asString()));
                             } else if (KeyConstant.isArrayType(type.toLowerCase())) {
                                 String splitter = columnMeta.getJSONObject(i).getString(KeyConstant.COLUMN_SPLITTER);
                                 if (Strings.isNullOrEmpty(splitter)) {
@@ -196,7 +203,24 @@ public class MongoDBWriter extends Writer{
                                             list.add(Double.parseDouble(s));
                                         }
                                         data.put(columnMeta.getJSONObject(i).getString(KeyConstant.COLUMN_NAME), list.toArray(new Double[0]));
-                                    } else if (itemType.equalsIgnoreCase(Column.Type.INT.name())) {
+                                    }/*else if (itemType.equalsIgnoreCase(Column.Type.ARRAY.name())){
+                                        //对于数组类型 当itemtype为array类型时候，表明内部还有一层子数组，所以该层进行对内层子数据拼接成json
+                                        ArrayList<String> list = new ArrayList<String>();
+                                        for (String s : item) {
+                                            ObjectMapper mapper = new ObjectMapper();
+                                            Map<String,Object> map = new HashMap<String,Object>();
+                                            String [] sub_item_array = s.split(columnMeta.getJSONObject(i).getString(KeyConstant.SUB_ITEM_SPLITER));
+
+                                            for (int j = 0;j <= sub_item_array.length -1 ; j++){
+                                                JSONArray sub_columMeta = JSON.parseArray(columnMeta.getJSONObject(i).getString(KeyConstant.SUB_MONGO_COLUMN));
+                                                map.put(sub_columMeta.getJSONObject(j).getString(KeyConstant.COLUMN_NAME),sub_item_array[j]);
+                                            }
+                                            //目前存在问题
+                                            Object subjson = JSONObject.toJSON(map.toString());
+                                            list.add(JSONObject.toJSONString(subjson));
+                                        }
+                                        data.put(columnMeta.getJSONObject(i).getString(KeyConstant.COLUMN_NAME), list.toArray(new String[0]));
+                                    }*/ else if (itemType.equalsIgnoreCase(Column.Type.INT.name())) {
                                         ArrayList<Integer> list = new ArrayList<Integer>();
                                         for (String s : item) {
                                             list.add(Integer.parseInt(s));
@@ -226,25 +250,25 @@ public class MongoDBWriter extends Writer{
                                 } else {
                                     data.put(columnMeta.getJSONObject(i).getString(KeyConstant.COLUMN_NAME), record.getColumn(i).asString().split(splitter));
                                 }
-                            } else if(type.toLowerCase().equalsIgnoreCase("json")) {
+                            } else if (type.toLowerCase().equalsIgnoreCase("json")) {
                                 //如果是json类型,将其进行转换
                                 Object mode = com.mongodb.util.JSON.parse(record.getColumn(i).asString());
-                                data.put(columnMeta.getJSONObject(i).getString(KeyConstant.COLUMN_NAME),JSON.toJSON(mode));
+                                data.put(columnMeta.getJSONObject(i).getString(KeyConstant.COLUMN_NAME), JSON.toJSON(mode));
                             } else {
                                 data.put(columnMeta.getJSONObject(i).getString(KeyConstant.COLUMN_NAME), record.getColumn(i).asString());
                             }
                         } catch (Exception e) {
                             super.getTaskPluginCollector().collectDirtyRecord(record, e);
                         }
-                    } else if(record.getColumn(i) instanceof LongColumn) {
+                    } else if (record.getColumn(i) instanceof LongColumn) {
 
                         if (Column.Type.LONG.name().equalsIgnoreCase(type)) {
-                            data.put(columnMeta.getJSONObject(i).getString(KeyConstant.COLUMN_NAME),record.getColumn(i).asLong());
+                            data.put(columnMeta.getJSONObject(i).getString(KeyConstant.COLUMN_NAME), record.getColumn(i).asLong());
                         } else {
                             super.getTaskPluginCollector().collectDirtyRecord(record, "record's [" + i + "] column's type should be: " + type);
                         }
 
-                    } else if(record.getColumn(i) instanceof DateColumn) {
+                    } else if (record.getColumn(i) instanceof DateColumn) {
 
                         if (Column.Type.DATE.name().equalsIgnoreCase(type)) {
                             data.put(columnMeta.getJSONObject(i).getString(KeyConstant.COLUMN_NAME),
@@ -253,7 +277,7 @@ public class MongoDBWriter extends Writer{
                             super.getTaskPluginCollector().collectDirtyRecord(record, "record's [" + i + "] column's type should be: " + type);
                         }
 
-                    } else if(record.getColumn(i) instanceof DoubleColumn) {
+                    } else if (record.getColumn(i) instanceof DoubleColumn) {
 
                         if (Column.Type.DOUBLE.name().equalsIgnoreCase(type)) {
                             data.put(columnMeta.getJSONObject(i).getString(KeyConstant.COLUMN_NAME),
@@ -262,7 +286,7 @@ public class MongoDBWriter extends Writer{
                             super.getTaskPluginCollector().collectDirtyRecord(record, "record's [" + i + "] column's type should be: " + type);
                         }
 
-                    } else if(record.getColumn(i) instanceof BoolColumn) {
+                    } else if (record.getColumn(i) instanceof BoolColumn) {
 
                         if (Column.Type.BOOL.name().equalsIgnoreCase(type)) {
                             data.put(columnMeta.getJSONObject(i).getString(KeyConstant.COLUMN_NAME),
@@ -271,7 +295,7 @@ public class MongoDBWriter extends Writer{
                             super.getTaskPluginCollector().collectDirtyRecord(record, "record's [" + i + "] column's type should be: " + type);
                         }
 
-                    } else if(record.getColumn(i) instanceof BytesColumn) {
+                    } else if (record.getColumn(i) instanceof BytesColumn) {
 
                         if (Column.Type.BYTES.name().equalsIgnoreCase(type)) {
                             data.put(columnMeta.getJSONObject(i).getString(KeyConstant.COLUMN_NAME),
@@ -281,7 +305,7 @@ public class MongoDBWriter extends Writer{
                         }
 
                     } else {
-                        data.put(columnMeta.getJSONObject(i).getString(KeyConstant.COLUMN_NAME),record.getColumn(i).asString());
+                        data.put(columnMeta.getJSONObject(i).getString(KeyConstant.COLUMN_NAME), record.getColumn(i).asString());
                     }
                 }
                 dataList.add(data);
@@ -289,29 +313,120 @@ public class MongoDBWriter extends Writer{
             /**
              * 如果存在重复的值覆盖
              */
-            if(this.writeMode != null &&
+/*            if(this.writeMode != null &&
                     this.writeMode.getString(KeyConstant.IS_REPLACE) != null &&
                     KeyConstant.isValueTrue(this.writeMode.getString(KeyConstant.IS_REPLACE))) {
                 String uniqueKey = this.writeMode.getString(KeyConstant.UNIQUE_KEY);
-                if(!Strings.isNullOrEmpty(uniqueKey)) {
+                if (!Strings.isNullOrEmpty(uniqueKey)) {
                     List<ReplaceOneModel<BasicDBObject>> replaceOneModelList = new ArrayList<ReplaceOneModel<BasicDBObject>>();
-                    for(BasicDBObject data : dataList) {
+                    for (BasicDBObject data : dataList) {
                         BasicDBObject query = new BasicDBObject();
-                        if(uniqueKey != null) {
-                            query.put(uniqueKey,data.get(uniqueKey));
+                        if (uniqueKey != null) {
+                            query.put(uniqueKey, data.get(uniqueKey));
                         }
                         ReplaceOneModel<BasicDBObject> replaceOneModel = new ReplaceOneModel<BasicDBObject>(query, data, new UpdateOptions().upsert(true));
                         replaceOneModelList.add(replaceOneModel);
                     }
                     collection.bulkWrite(replaceOneModelList, new BulkWriteOptions().ordered(false));
-                } else {
-                    throw DataXException.asDataXException(MongoDBWriterErrorCode.ILLEGAL_VALUE,
-                            MongoDBWriterErrorCode.ILLEGAL_VALUE.getDescription());
                 }
             } else {
                 collection.insertMany(dataList);
+            }*/
+
+            if (this.writeMode != null &&
+                    this.writeMode.getString(KeyConstant.IS_UPDATE) != null &&
+                    KeyConstant.isValueTrue(this.writeMode.getString(KeyConstant.IS_UPDATE))) {
+                //先查数据，判断数据存在与否 ，存在set 不存在push
+                String[] uniqueKey = this.writeMode.getString(KeyConstant.UPDATE_KEY).split(",");
+                List<WriteModel<BasicDBObject>> writeModelList = new ArrayList<WriteModel<BasicDBObject>>();
+                for (BasicDBObject data : dataList) {
+                    Document options = new Document();
+                    for (String uk : uniqueKey) {
+                        if (uk.contains("$")) {
+                            String realuk = uk.replace("$.", "");
+                            options.append(realuk, data.get(uk));
+                        }
+                        options.append(uk, data.get(uk));
+                    }
+                    BasicDBObject query = new BasicDBObject("$and", options);
+                    FindIterable<BasicDBObject> basicDBObjects = coll.find(query);
+                    if (basicDBObjects.iterator().hasNext()) {
+                        //set
+                        String[] setKey = this.writeMode.getString(KeyConstant.SETKEY).split(",");
+                        BasicDBObject updateDocument = new BasicDBObject();
+                        for (String key : setKey) {
+                            updateDocument.append(key,data.get(key));
+                        }
+                        UpdateOneModel<BasicDBObject> updateOneModel = new UpdateOneModel<BasicDBObject>(query, new BasicDBObject("set", updateDocument));
+                        writeModelList.add(updateOneModel);
+                    } else {
+                        //push
+                        for (String key:data.keySet()){
+                            BasicDBObject basicDBObject = createJSON(data);
+                            UpdateOneModel<BasicDBObject> updateOneModel = new UpdateOneModel<BasicDBObject>(query, new BasicDBObject("push", basicDBObject));
+                            writeModelList.add(updateOneModel);
+                        }
+
+                    }
+
+                }
+                coll.bulkWrite(writeModelList, new BulkWriteOptions().ordered(false));
+            } else {
+                List insertModelList = new ArrayList<BasicDBObject>();
+                for (BasicDBObject data : dataList) {
+                    insertModelList.add(createJSON(data));
+                }
+                coll.insertMany(insertModelList);
             }
         }
+
+
+/*
+        */
+/***
+         * 根据k形式生成对应json形式 ，其实$标识数组格式
+         *//*
+
+        public static BasicDBObject createJSON(BasicDBObject obj) {
+            BasicDBObject bDBObject = new BasicDBObject();
+            for (String key : obj.keySet()) {
+                if (key.indexOf(".") == -1) {
+                    return bDBObject.append(key, obj.get(key));
+                } else if ((key.substring(key.indexOf(".")+1, key.indexOf(".") + 1) != "$")) {
+                    String prekey = key.substring(0, key.indexOf("."));
+                    BasicDBObject basicDBObject = new BasicDBObject(key.substring(key.indexOf(".") + 1, key.length() - 1), obj.get(key));
+                    if (bDBObject.get(prekey) == null) {
+                        return bDBObject.append(prekey, createJSON(basicDBObject));
+                    } else {
+                        BasicDBObject basicDBObject1 = (BasicDBObject) bDBObject.get(prekey);
+                        BasicDBObject object = basicDBObject1.append(key.substring(key.indexOf(".") + 1, key.length() - 1), obj.get(key));
+                        return bDBObject.append(prekey, createJSON(object));
+                    }
+                } else (key.substring(key.indexOf("."), key.indexOf(".") + 1).equals("$") ){
+
+                    String prekey = key.substring(0, key.indexOf("."));
+                    BasicDBObject basicDBObject = new BasicDBObject(key.substring(key.indexOf(".")+1, key.length() - 1), obj.get(key));
+                    if (bDBObject.get(prekey) == null) {
+                        ArrayList arrayList = new ArrayList();
+                        return bDBObject.append(prekey, arrayList.add(createJSON(basicDBObject)));
+                    } else {
+                        if (bDBObject.get(prekey) instanceof ArrayList){
+                            ArrayList list1 = (ArrayList) bDBObject.get(prekey);
+
+                            list1.add(createJSON(new BasicDBObject(key.substring(key.indexOf(".") + 1, key.length() - 1), obj.get(key))));
+
+                            return bDBObject.append(prekey, list1);
+                        }
+
+                    }
+                }
+            }
+            return bDBObject;
+        }
+*/
+
+
+
 
 
         @Override
@@ -319,9 +434,10 @@ public class MongoDBWriter extends Writer{
             this.writerSliceConfig = this.getPluginJobConf();
             this.userName = writerSliceConfig.getString(KeyConstant.MONGO_USER_NAME);
             this.password = writerSliceConfig.getString(KeyConstant.MONGO_USER_PASSWORD);
+            this.authdb = writerSliceConfig.getString(KeyConstant.MONGO_AUTHDB);
             this.database = writerSliceConfig.getString(KeyConstant.MONGO_DB_NAME);
             if(!Strings.isNullOrEmpty(userName) && !Strings.isNullOrEmpty(password)) {
-                this.mongoClient = MongoUtil.initCredentialMongoClient(this.writerSliceConfig,userName,password,database);
+                this.mongoClient = MongoUtil.initCredentialMongoClient(this.writerSliceConfig,userName,password,authdb,database);
             } else {
                 this.mongoClient = MongoUtil.initMongoClient(this.writerSliceConfig);
             }
@@ -335,6 +451,100 @@ public class MongoDBWriter extends Writer{
         public void destroy() {
             mongoClient.close();
         }
+
+
+        public static BasicDBObject createJSON(BasicDBObject obj) {
+            BasicDBObject bDBObject = new BasicDBObject();
+            for (String key :obj.keySet()){
+                if (key.indexOf(".") == -1) {
+                     bDBObject.append(key, obj.get(key));
+                } else if ((! key.substring(key.indexOf(".")+1, key.indexOf(".") + 2).equals("$"))) {
+                    String prekey = key.substring(0, key.indexOf("."));
+                    String suffixKey = key.substring(key.indexOf(".") + 1, key.length());
+                    BasicDBObject basicDBObject = new BasicDBObject(suffixKey, obj.get(key));
+                    if (bDBObject.get(prekey) == null) {
+                         bDBObject.append(prekey, createJSON(basicDBObject));
+                    } else {
+                        BasicDBObject basicDBObject1 = (BasicDBObject) bDBObject.get(prekey);
+
+                        BasicDBObject object = basicDBObject1.append(suffixKey, obj.get(key));
+                         bDBObject.append(prekey, createJSON(object));
+                    }
+                } else if (key.substring(key.indexOf(".")+1, key.indexOf(".") + 2).equals("$") ) {
+
+                    String prekey = key.substring(0, key.indexOf("."));
+                    String suffixKey = key.substring(key.indexOf(".") + 1, key.length());
+                    BasicDBObject basicDBObject = new BasicDBObject(suffixKey, obj.get(key));
+                    if (bDBObject.get(prekey) == null) {
+                        ArrayList arrayList = new ArrayList();
+                         bDBObject.append(prekey, arrayList.add(createJSON(basicDBObject)));
+                    } else {
+                        if (bDBObject.get(prekey) instanceof ArrayList) {
+                            ArrayList list1 = (ArrayList) bDBObject.get(prekey);
+
+                            list1.add(createJSON(new BasicDBObject(suffixKey, obj.get(key))));
+                            bDBObject.append(prekey, list1);
+                        }
+                    }
+                }
+            }
+            return bDBObject;
+        }
+
+
+
+
+/*        public static BasicDBObject createJSON(BasicDBObject obj,String key) {
+            BasicDBObject bDBObject = new BasicDBObject();
+
+                if (key.indexOf(".") == -1) {
+                    return bDBObject.append(key, obj.get(key));
+                } else if ((! key.substring(key.indexOf(".")+1, key.indexOf(".") + 2).equals("$"))) {
+                    String prekey = key.substring(0, key.indexOf("."));
+                    String suffixKey = key.substring(key.indexOf(".") + 1, key.length());
+                    BasicDBObject basicDBObject = new BasicDBObject(suffixKey, obj.get(key));
+                    if (bDBObject.get(prekey) == null) {
+                        return bDBObject.append(prekey, createJSON(basicDBObject,suffixKey));
+                    } else {
+                        BasicDBObject basicDBObject1 = (BasicDBObject) bDBObject.get(prekey);
+
+                        BasicDBObject object = basicDBObject1.append(suffixKey, obj.get(key));
+                        return bDBObject.append(prekey, createJSON(object,suffixKey));
+                    }
+                } else if (key.substring(key.indexOf(".")+1, key.indexOf(".") + 2).equals("$") ) {
+
+                    String prekey = key.substring(0, key.indexOf("."));
+                    String suffixKey = key.substring(key.indexOf(".") + 1, key.length() );
+                    BasicDBObject basicDBObject = new BasicDBObject(suffixKey, obj.get(key));
+                    if (bDBObject.get(prekey) == null) {
+                        ArrayList arrayList = new ArrayList();
+                        return bDBObject.append(prekey, arrayList.add(createJSON(basicDBObject,suffixKey)));
+                    } else {
+                        if (bDBObject.get(prekey) instanceof ArrayList) {
+                            ArrayList list1 = (ArrayList) bDBObject.get(prekey);
+
+                            list1.add(createJSON(new BasicDBObject(suffixKey, obj.get(key)),suffixKey));
+
+                            return bDBObject.append(prekey, list1);
+                        }
+
+                    }
+                }
+
+            return bDBObject;
+        }*/
+
+    }
+
+    public static void main(String[] args) {
+        BasicDBObject basicDBObject = new BasicDBObject();
+        BasicDBObject append = basicDBObject.append("d.$.d","faf").append("tag.di","sss");
+
+
+        String toJson = Task.createJSON(append).toJson();
+
+
+        System.out.println(toJson);
     }
 
 }
